@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+
+# Data
+data/
+
+# Project outputs and logs
+outputs/
+logs/
+*.log
+stakeholder_report.json
+stakeholder_queries.cypher
+extractions.jsonl
+
+# Misc
+.DS_Store
+.idea/
+.vscode/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env.local
+.env.development.local
+.env.test.local
+standard**
+method.md
