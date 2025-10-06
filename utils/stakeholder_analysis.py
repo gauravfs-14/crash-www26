@@ -180,6 +180,47 @@ class StakeholderAnalyzer:
             ]
             
             return analysis
+
+    def analyze_causal_motifs(self, min_frequency: int = 1):
+        """Mine common causal motifs similar to builder.get_causal_motifs."""
+        with self.driver.session() as session:
+            motifs: List[Dict[str, Any]] = []
+
+            # Motif 1: Alcohol + Speed + Weather
+            result = session.run(
+                """
+                MATCH (p:Person)-[:CAUSES]->(e:CausalEvent)-[:OCCURRED_UNDER]->(c1:Condition {type: 'Impairment'})
+                MATCH (e)-[:OCCURRED_UNDER]->(c2:Condition {type: 'Speed'})
+                MATCH (e)-[:OCCURRED_UNDER]->(c3:Condition {type: 'Weather'})
+                RETURN 'Alcohol_Speed_Weather' as motif, count(DISTINCT e) as frequency
+                """
+            )
+            rec = result.single()
+            if rec and rec["frequency"] >= min_frequency:
+                motifs.append({
+                    "pattern": rec["motif"],
+                    "frequency": rec["frequency"],
+                    "description": "Driver under influence + speeding + adverse weather"
+                })
+
+            # Motif 2: Distraction + Intersection
+            result = session.run(
+                """
+                MATCH (p:Person)-[:CAUSES]->(e:CausalEvent)-[:OCCURRED_UNDER]->(c1:Condition {type: 'Distraction'})
+                MATCH (e)-[:OCCURRED_UNDER]->(c2:Condition)
+                WHERE c2.name CONTAINS 'intersection'
+                RETURN 'Distraction_Intersection' as motif, count(DISTINCT e) as frequency
+                """
+            )
+            rec = result.single()
+            if rec and rec["frequency"] >= min_frequency:
+                motifs.append({
+                    "pattern": rec["motif"],
+                    "frequency": rec["frequency"],
+                    "description": "Distracted driving at intersections"
+                })
+
+            return motifs
     
     def generate_comprehensive_report(self):
         """Generate comprehensive stakeholder analysis report."""
@@ -187,7 +228,8 @@ class StakeholderAnalyzer:
             'traffic_safety_engineers': self.analyze_for_traffic_safety_engineers(),
             'law_enforcement': self.analyze_for_law_enforcement(),
             'public_health_officials': self.analyze_for_public_health_officials(),
-            'insurance_industry': self.analyze_for_insurance_industry()
+            'insurance_industry': self.analyze_for_insurance_industry(),
+            'causal_motifs': self.analyze_causal_motifs(min_frequency=1)
         }
         
         return report

@@ -215,14 +215,24 @@ class Neo4jGraphBuilder:
                     MERGE (e)-[:AFFECTS {impact_type: 'direct'}]->(p)
                 """, {"event_id": event_id, "entity": entity})
         
-        # Event INVOLVES units
+        # Event INVOLVES units (map generic labels like 'Unit 1' to canonical Unit_ID if available)
         for unit in referenced_units:
-            if unit and unit != "N/A":
-                session.run("""
-                    MATCH (e:CausalEvent {id: $event_id})
-                    MERGE (u:Unit {name: $unit})
-                    MERGE (e)-[:INVOLVES]->(u)
-                """, {"event_id": event_id, "unit": unit})
+            if not unit or unit == "N/A":
+                continue
+            mapped = unit
+            # Attempt to parse agent crash id from event id prefix
+            crash_id = None
+            if event_id and "_" in event_id:
+                crash_id = event_id.split("_")[0]
+            if crash_id:
+                # If the unit label looks like a generic 'Unit X', record as label but avoid proliferating nodes
+                # Prefer linking to Person when possible, otherwise create Unit node with normalized name
+                pass
+            session.run("""
+                MATCH (e:CausalEvent {id: $event_id})
+                MERGE (u:Unit {name: $name})
+                MERGE (e)-[:INVOLVES]->(u)
+            """, {"event_id": event_id, "name": mapped})
     
     def create_crash_context(self, session, crash_id: str, extraction_data: Dict[str, Any]):
         """Create crash context nodes for comprehensive analysis."""
@@ -321,11 +331,26 @@ class Neo4jGraphBuilder:
                 event.get("mentions_alcohol_or_drugs")
             )
             
+            # Normalize referenced units: map 'Unit X' -> f"{crash_id}_{X}" if possible
+            referenced_units = event.get("referenced_units") or []
+            normalized_units: List[str] = []
+            for u in referenced_units:
+                if not u:
+                    continue
+                u_str = str(u)
+                # Match patterns like Unit 1, UNIT-01, u2
+                import re
+                m = re.match(r"(?i)\b(?:unit|u)[-\s#]?0*([1-9]\d*)\b", u_str)
+                if m and crash_id:
+                    normalized_units.append(f"{crash_id}_{m.group(1)}")
+                else:
+                    normalized_units.append(u_str)
+
             # Create comprehensive causal relationships
             self.create_causal_relationships(
                 session, person_id, event_id,
                 affected_entities,
-                event.get("referenced_units") or [],
+                normalized_units,
                 event.get("conditions") or []
             )
     

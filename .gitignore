@@ -33,3 +33,5 @@ extractions.jsonl
 .env.test.local
 standard**
 method.md
+VISUALIZATIONS.md
+CURSOR.md
