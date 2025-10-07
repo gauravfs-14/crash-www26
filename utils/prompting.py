@@ -79,7 +79,7 @@ def build_few_shots() -> List[dict]:
         {
             "input": (
                 "Extract events for this specific person/vehicle:\n"
-                "Person_ID: 14963691_1_1\nUnit_ID: 14963691_1\nVIN: 1GNEC13T21R116524\n"
+                "Crash_ID: 14963691\nPerson_ID: 14963691_1_1\nUnit_ID: 14963691_1\nVIN: 1GNEC13T21R116524\n"
                 "License_Plate: FPS2038\nVehicle_Details: 2001 Gray Chevrolet Tahoe\n\nCrash Narrative: "
                 f"{narrative_2}"
             ),
@@ -127,7 +127,7 @@ def build_prompt() -> ChatPromptTemplate:
     messages.append((
         "human",
         "Extract ALL events for this specific person/vehicle (both causal and affected):\n"
-        "Person_ID: {person_id}\nUnit_ID: {unit_id}\nVIN: {vin}\n"
+        "Crash_ID: {crash_id}\nPerson_ID: {person_id}\nUnit_ID: {unit_id}\nVIN: {vin}\n"
         "License_Plate: {license_plate}\nVehicle_Details: {vehicle_details}\n\nCrash Narrative: {narrative}"
     ))
 

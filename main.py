@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import signal
+import sys
 from typing import List, Optional
 import getpass
 from utils.logger import SimpleLogger
@@ -30,6 +32,22 @@ from utils.gemini_client import RotatingGeminiClient
 from utils.preprocess import build_id_maps, replace_mentions
 
 logger = SimpleLogger(log_file="logs/main.log")
+
+# Global variables for progress tracking
+total_processed = 0
+extractions_path = None
+
+def signal_handler(signum, frame):
+    """Handle process termination gracefully"""
+    global total_processed, extractions_path
+    logger.info(f"Process terminated (signal {signum}). Progress saved: {total_processed} records")
+    if extractions_path:
+        logger.info(f"Extractions saved to: {extractions_path}")
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 
 
 class CausalEvent(BaseModel):
@@ -206,6 +224,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     # Decide extraction source
+    global extractions_path, total_processed
     extractions_path = args.output or os.path.join(args.out_dir, "extractions.jsonl")
     if args.use_existing_extractions:
         if not os.path.exists(args.use_existing_extractions):
@@ -213,17 +232,126 @@ def main():
         extractions_path = args.use_existing_extractions
         logger.info(f"Skipping extraction. Using existing extractions at: {extractions_path}")
     else:
-        results = extract_events_for_rows(df, args.limit)
-        with open(extractions_path, "w", encoding="utf-8") as f:
-            for item in tqdm(results, desc="Writing results", total=len(results)):
-                f.write(item.model_dump_json() + "\n")
-        logger.info(f"Wrote {len(results)} extractions to {extractions_path}")
+        # Process and save incrementally to avoid losing progress
+        logger.info(f"Processing {args.limit} records with incremental saving...")
+        
+        # Check if we have existing progress to resume from
+        existing_count = 0
+        if os.path.exists(extractions_path):
+            with open(extractions_path, 'r', encoding='utf-8') as f:
+                existing_count = sum(1 for line in f if line.strip())
+            logger.info(f"Found {existing_count} existing extractions, resuming from record {existing_count + 1}")
+        
+        # Open file in append mode to resume from where we left off
+        mode = "a" if existing_count > 0 else "w"
+        with open(extractions_path, mode, encoding="utf-8") as f:
+            # Skip already processed records
+            start_index = existing_count
+            total_processed = existing_count
+            
+            for i, (_, row) in enumerate(tqdm(df.head(args.limit).iterrows(), total=args.limit, desc="Extracting events")):
+                # Skip records we've already processed
+                if i < start_index:
+                    continue
+                    
+                try:
+                    # Extract single record
+                    narrative = str(row.get("Investigator_Narrative", "")).strip()
+                    crash_id = str(row.get("Crash_ID", "")).strip() or None
+                    if not narrative: 
+                        continue
+
+                    # Extract entity context for better identification
+                    person_id = str(row.get("Person_ID", "")).strip() or "N/A"
+                    unit_id = str(row.get("Unit_ID", "")).strip() or "N/A"
+                    vin = str(row.get("VIN", "")).strip() or "N/A"
+                    license_plate = str(row.get("Veh_Lic_Plate_Nbr", "")).strip() or "N/A"
+                    
+                    # Build vehicle details string
+                    vehicle_parts = []
+                    if str(row.get("Veh_Mod_Year", "")).strip() != "N/A":
+                        vehicle_parts.append(f"{row.get('Veh_Mod_Year')}")
+                    if str(row.get("Veh_Color_ID", "")).strip() != "N/A":
+                        vehicle_parts.append(f"{row.get('Veh_Color_ID')}")
+                    if str(row.get("Veh_Make_ID", "")).strip() != "N/A":
+                        vehicle_parts.append(f"{row.get('Veh_Make_ID')}")
+                    if str(row.get("Veh_Mod_ID", "")).strip() != "N/A":
+                        vehicle_parts.append(f"{row.get('Veh_Mod_ID')}")
+                    vehicle_details = " ".join(vehicle_parts) if vehicle_parts else "N/A"
+
+                    # Preprocess narrative using CURSOR.md mapping rules
+                    from utils.preprocess import build_id_maps, replace_mentions
+                    id_maps = build_id_maps(row)
+                    safe_narrative = replace_mentions(narrative, id_maps, crash_id or "")
+
+                    # Use rotating Gemini client for rate-limit resilience
+                    from utils.gemini_client import RotatingGeminiClient
+                    from utils.prompting import build_prompt
+                    client = RotatingGeminiClient()
+                    prompt = build_prompt()
+                    structured = client.with_structured_output(Extraction)
+                    
+                    # Invoke with model and key rotation and retries
+                    result: Extraction = client.run_structured(prompt, Extraction, {
+                        "crash_id": crash_id,
+                        "person_id": person_id,
+                        "unit_id": unit_id,
+                        "vin": vin,
+                        "license_plate": license_plate,
+                        "vehicle_details": vehicle_details,
+                        "narrative": safe_narrative
+                    })
+                    
+                    # Save immediately to avoid losing progress
+                    f.write(result.model_dump_json() + "\n")
+                    f.flush()  # Force write to disk
+                    os.fsync(f.fileno())  # Force OS to write to disk
+                    
+                    total_processed += 1
+                    
+                    # Update database incrementally every 50 records
+                    if total_processed % 50 == 0 and args.neo4j:
+                        logger.info(f"Updating database with {total_processed} records...")
+                        try:
+                            from utils.neo4j_graph import Neo4jGraphBuilder
+                            uri = os.environ.get("NEO4J_URI")
+                            password = os.environ.get("NEO4J_PASSWORD")
+                            
+                            if uri and password:
+                                builder = Neo4jGraphBuilder(uri, password)
+                                # Clear database only on first update
+                                clear_first = (total_processed == 50)
+                                builder.build_graph_from_jsonl(extractions_path, clear_first=clear_first)
+                                
+                                # Show current database stats
+                                stats = builder.get_graph_stats()
+                                logger.info(f"Database updated: {stats.get('Crash_count', 0)} crashes, {stats.get('CausalEvent_count', 0)} events")
+                                builder.close()
+                            else:
+                                logger.warning("Neo4j credentials not found, skipping database update")
+                        except Exception as e:
+                            logger.error(f"Error updating database: {e}")
+                    
+                    # Log progress more frequently for better monitoring
+                    if total_processed % 10 == 0:  # Every 10 records
+                        logger.info(f"Processed {total_processed} records, saved to {extractions_path}")
+                    elif total_processed % 100 == 0:  # Every 100 records
+                        logger.info(f"Milestone: {total_processed} records processed and saved")
+                        
+                except KeyboardInterrupt:
+                    logger.info(f"Process interrupted by user. Progress saved: {total_processed} records")
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing record {i}: {e}")
+                    # Continue with next record instead of stopping
+                    continue
+                    
+        logger.info(f"Completed extraction of {total_processed} records, saved to {extractions_path}")
     
-    # Build Neo4j graph if requested
+    # Build Neo4j graph if requested (final update with any remaining records)
     if args.neo4j:
-        logger.info("Building Neo4j graph...")
+        logger.info("Performing final Neo4j graph update...")
         try:
-            from utils.neo4j_graph import Neo4jGraphBuilder
             from utils.neo4j_graph import Neo4jGraphBuilder
             
             uri = os.environ.get("NEO4J_URI")
@@ -234,6 +362,7 @@ def main():
                 return
             
             builder = Neo4jGraphBuilder(uri, password)
+            # Only clear if explicitly requested, otherwise just add new records
             builder.build_graph_from_jsonl(extractions_path, clear_first=args.clear_neo4j)
             
             # Show graph statistics
